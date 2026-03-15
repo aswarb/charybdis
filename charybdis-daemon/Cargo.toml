@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 charybdis-lib = { path = "../charybdis-lib" }
+
+[lints]
+workspace = true

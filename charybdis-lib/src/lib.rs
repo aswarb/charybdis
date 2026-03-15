@@ -1,5 +1,3 @@
-#![allow(clippy::needless_return)]
-
 use std::collections::BTreeSet;
 const MAX_F64_PRECISION: u8 = 15;
 // -------------------------- Config Types

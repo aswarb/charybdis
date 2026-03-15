@@ -5,3 +5,6 @@ members = [
     "charybdis-tui",
 ]
 resolver = "2"
+
+[workspace.lints.clippy]
+needless_return = "allow"
