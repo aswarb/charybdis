@@ -1,6 +1,15 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 const MAX_F64_PRECISION: u8 = 15;
 // -------------------------- Config Types
+
+pub trait Validatable<T> {
+    fn validate(&self, value: &T) -> Result<(), String>;
+}
+
+pub trait ApplyPolicy<T> {
+    fn apply_policy(&self, value: T) -> Option<T>;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NanPolicy {
     Allow,
@@ -48,6 +57,28 @@ impl SizeConfig {
     }
 }
 
+impl Validatable<usize> for SizeConfig {
+    fn validate(&self, value: &usize) -> Result<(), String> {
+        if *value < self.min {
+            return Err(format!("size {} is below minimum {}", value, self.min));
+        }
+        if *value > self.max {
+            return Err(format!("size {} is above maximum {}", value, self.max));
+        }
+        return Ok(());
+    }
+}
+
+impl Validatable<Value> for SizeConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        let n = match value {
+            Value::Size(n) => n,
+            _ => return Err("Expected Size Value".to_string()),
+        };
+        return self.validate(n);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextConfig {
     pub length: SizeConfig,
@@ -76,6 +107,22 @@ impl TextConfig {
         };
 
         return Ok(config);
+    }
+}
+
+impl Validatable<String> for TextConfig {
+    fn validate(&self, value: &String) -> Result<(), String> {
+        return self.length.validate(&value.len());
+    }
+}
+
+impl Validatable<Value> for TextConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        let s = match value {
+            Value::Text(s) => s,
+            _ => return Err("Expected Text Value".to_string()),
+        };
+        return self.validate(s);
     }
 }
 
@@ -114,6 +161,24 @@ impl NumberConfig {
     }
 }
 
+impl Validatable<Value> for NumberConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        let n = match value {
+            Value::Number(n) => n,
+            _ => return Err("Expected Number Value".to_string()),
+        };
+
+        if *n < self.min {
+            return Err(format!("value {} is below minimum {}", n, self.min));
+        }
+        if *n > self.max {
+            return Err(format!("value {} is above maximum {}", n, self.max));
+        }
+
+        return Ok(());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContinuousRangeConfig {
     pub number: NumberConfig,
@@ -148,11 +213,37 @@ impl ContinuousRangeConfig {
     }
 }
 
+impl Validatable<Value> for ContinuousRangeConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        return self.number.validate(value);
+    }
+}
+
+impl ApplyPolicy<f64> for ContinuousRangeConfig {
+    fn apply_policy(&self, value: f64) -> Option<f64> {
+        if value.is_nan() {
+            return match &self.number.nan_policy {
+                NanPolicy::Allow => Some(value),
+                NanPolicy::Reject => None,
+                NanPolicy::Default(d) => Some(*d),
+            };
+        }
+
+        let shaped = match &self.shorten_type {
+            ShortenNumberPolicy::Round => roundf64_to_precision(value, self.precision),
+            ShortenNumberPolicy::Truncate => truncatef64(value, self.precision),
+        };
+
+        return Some(shaped);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscreteRangeConfig {
     pub number: NumberConfig,
     pub step: f64,
 }
+
 impl DiscreteRangeConfig {
     pub fn new(number: NumberConfig, step: f64) -> Result<Self, String> {
         if step <= 0.0 {
@@ -175,30 +266,82 @@ impl DiscreteRangeConfig {
     }
 }
 
+impl Validatable<Value> for DiscreteRangeConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        return self.number.validate(value);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeriesConfig {
     pub length: SizeConfig,
-    pub values: SizeConfig,
+    pub values: NumberConfig,
 }
+
 impl SeriesConfig {
-    pub fn new(length: SizeConfig, values: SizeConfig) -> Result<Self, String> {
+    pub fn new(length: SizeConfig, values: NumberConfig) -> Result<Self, String> {
         let config = Self { length, values };
         return Ok(config);
+    }
+}
+
+impl Validatable<Value> for SeriesConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        return match value {
+            Value::Number(_) => self.values.validate(value),
+            Value::Series(items) => {
+                let length_check = self.length.validate(&items.len());
+                if length_check.is_err() {
+                    return length_check;
+                }
+                for item in items {
+                    let item_check = self.values.validate(&Value::Number(*item));
+                    if item_check.is_err() {
+                        return item_check;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err("Expected Number or Series Value".to_string()),
+        };
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListConfig {
     pub length: SizeConfig,
-    pub values: SizeConfig,
+    pub values: TextConfig,
 }
 
 impl ListConfig {
-    pub fn new(length: SizeConfig, values: SizeConfig) -> Result<Self, String> {
+    pub fn new(length: SizeConfig, values: TextConfig) -> Result<Self, String> {
         let config = Self { length, values };
         return Ok(config);
     }
 }
+
+impl Validatable<Value> for ListConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        return match value {
+            Value::Text(_) => self.values.validate(value),
+            Value::List(items) => {
+                let length_check = self.length.validate(&items.len());
+                if length_check.is_err() {
+                    return length_check;
+                }
+                for item in items {
+                    let item_check = self.values.validate(item);
+                    if item_check.is_err() {
+                        return item_check;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err("Expected Text or List Value".to_string()),
+        };
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumConfig {
     pub options: BTreeSet<String>,
@@ -218,6 +361,27 @@ impl EnumConfig {
     }
 }
 
+impl Validatable<Value> for EnumConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        let t = match value {
+            Value::Text(t) => t,
+            _ => return Err("Expected Enum Value".to_string()),
+        };
+
+        if !self.options.contains(t) {
+            let options_str = self
+                .options
+                .iter()
+                .cloned()
+                .collect::<Vec<String>>()
+                .join(", ");
+            return Err(format!("value {} is not one of [{}]", t, options_str));
+        }
+
+        return Ok(());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BooleanConfig {
     pub default: bool,
@@ -229,8 +393,19 @@ impl BooleanConfig {
     }
 }
 
+impl Validatable<Value> for BooleanConfig {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        let result = match value {
+            Value::Boolean(_) => Ok(()),
+            _ => Err("Expected Boolean Value".to_string()),
+        };
+        return result;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValueType {
+    Size(SizeConfig),
     Text(TextConfig),
     Number(NumberConfig),
     Boolean(BooleanConfig),
@@ -238,9 +413,32 @@ pub enum ValueType {
     DiscreteRange(DiscreteRangeConfig),
     Series(SeriesConfig),
     List(ListConfig),
-    Enum(NumberConfig),
+    Enum(EnumConfig),
 }
 
+impl Validatable<Value> for ValueType {
+    fn validate(&self, value: &Value) -> Result<(), String> {
+        return match self {
+            ValueType::Size(config) => config.validate(value),
+            ValueType::Text(config) => config.validate(value),
+            ValueType::Number(config) => config.validate(value),
+            ValueType::Boolean(config) => config.validate(value),
+            ValueType::ContinuousRange(config) => config.validate(value),
+            ValueType::DiscreteRange(config) => config.validate(value),
+            ValueType::Series(config) => config.validate(value),
+            ValueType::List(config) => config.validate(value),
+            ValueType::Enum(config) => config.validate(value),
+        };
+    }
+}
+
+pub struct Register {
+    pub value_type: ValueType,
+    pub value: Value,
+    pub actions: BTreeMap<String, String>,
+}
+
+pub type Registry = BTreeMap<String, Register>;
 // -------------------------- Value Types
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,10 +446,9 @@ pub enum Value {
     Text(String),
     Number(f64),
     Boolean(bool),
-    Range(f64),
+    Size(usize),
     Series(Vec<f64>),
     List(Vec<String>),
-    Enum(String),
 }
 
 // -------------------------- Utils
@@ -277,20 +474,4 @@ pub fn roundf64_to_precision(value: f64, precision: u8) -> f64 {
 pub fn truncatef64(value: f64, precision: u8) -> f64 {
     let factor = 10_f64.powi(precision as i32);
     return (value * factor).trunc() / factor;
-}
-// -------------------------- Default
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
 }
