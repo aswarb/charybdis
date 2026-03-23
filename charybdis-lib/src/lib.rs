@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{RwLock};
 const MAX_F64_PRECISION: u8 = 15;
 // -------------------------- Config Types
 
@@ -434,7 +435,7 @@ impl Validatable<Value> for ValueType {
 
 pub struct Register {
     pub value_type: ValueType,
-    pub value: Value,
+    pub value: RwLock<Value>,
     pub actions: BTreeMap<String, String>,
 }
 
